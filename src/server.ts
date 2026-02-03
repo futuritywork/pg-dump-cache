@@ -193,9 +193,21 @@ Bun.serve({
         req.headers.get("x-real-ip") ??
         "unknown";
       const wait = url.searchParams.get("wait") === "true";
+      const fresh = url.searchParams.get("fresh") === "true";
       let waited = false;
 
-      if (wait) {
+      if (fresh) {
+        // Force a brand new dump and wait for it
+        waited = true;
+        try {
+          await ensureFreshCache(0);
+        } catch {
+          console.log(
+            `[DUMP] ip=${ip} error="Refresh failed" fresh=true waited=${waited}`,
+          );
+          return new Response("Refresh failed", { status: 500 });
+        }
+      } else if (wait) {
         waited = needsRefresh(ttl);
         try {
           await ensureFreshCache(ttl);
@@ -237,7 +249,7 @@ Bun.serve({
       const durationMs = Math.round(performance.now() - requestStart);
       const sizeMB = (file.size / 1024 / 1024).toFixed(2);
       console.log(
-        `[DUMP] ip=${ip} size=${sizeMB}MB cache_age=${cacheAgeSeconds}s waited=${waited} duration=${durationMs}ms`,
+        `[DUMP] ip=${ip} size=${sizeMB}MB cache_age=${cacheAgeSeconds}s fresh=${fresh} waited=${waited} duration=${durationMs}ms`,
       );
 
       return new Response(file, {

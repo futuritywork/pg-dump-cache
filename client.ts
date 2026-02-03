@@ -70,29 +70,16 @@ async function getStatus(): Promise<{
   return res.json();
 }
 
-async function triggerRefresh(): Promise<void> {
-  console.log("Triggering refresh...");
-  const res = await fetch(`${CACHE_SERVER_URL}/refresh`, {
-    method: "POST",
-    headers,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(
-      `Refresh failed: ${res.status} ${body.error ?? res.statusText}`,
-    );
-  }
-  console.log("Refresh completed");
-}
-
-async function downloadDump(
-  wait: boolean,
-): Promise<{ dumpPath: string; tempDir: string }> {
+async function downloadDump(options: {
+  wait: boolean;
+  fresh: boolean;
+}): Promise<{ dumpPath: string; tempDir: string }> {
   const tempDir = join(tmpdir(), `pg-dump-cache-${Date.now()}`);
   await mkdir(tempDir, { recursive: true });
 
   const url = new URL(`${CACHE_SERVER_URL}/dump`);
-  if (wait) url.searchParams.set("wait", "true");
+  if (options.fresh) url.searchParams.set("fresh", "true");
+  else if (options.wait) url.searchParams.set("wait", "true");
 
   console.log(`Fetching dump from ${url}...`);
   const downloadStart = performance.now();
@@ -260,11 +247,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (values.fresh) {
-    await triggerRefresh();
-  }
-
-  const { dumpPath, tempDir } = await downloadDump(values.wait ?? false);
+  const { dumpPath, tempDir } = await downloadDump({
+    wait: values.wait ?? false,
+    fresh: values.fresh ?? false,
+  });
   try {
     await restoreDump(dumpPath);
   } finally {
