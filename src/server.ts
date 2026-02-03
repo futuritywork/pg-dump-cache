@@ -156,12 +156,31 @@ function triggerRefresh(ttl: number = TTL): void {
   });
 }
 
+const startupStart = performance.now();
+console.log("[STARTUP] Initializing...");
+
 await loadExistingDumps();
 
-if (!latestCache) {
-  console.log("No existing cache found, fetching initial dump...");
+if (latestCache) {
+  const ageSeconds = Math.round(getCacheAgeSeconds());
+  const isStale = needsRefresh();
+  console.log(
+    `[STARTUP] Found existing cache: age=${ageSeconds}s stale=${isStale}`,
+  );
+  if (isStale) {
+    console.log("[STARTUP] Cache is stale, queuing background refresh...");
+    triggerRefresh();
+  }
+} else {
+  console.log("[STARTUP] No existing cache found, fetching initial dump...");
   await ensureFreshCache(0);
+  console.log(
+    `[STARTUP] Initial dump complete: ${((performance.now() - startupStart) / 1000).toFixed(1)}s`,
+  );
 }
+
+const startupMs = Math.round(performance.now() - startupStart);
+console.log(`[STARTUP] Ready in ${startupMs}ms`);
 
 Bun.serve({
   port: PORT,
