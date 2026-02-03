@@ -60,8 +60,22 @@ To disable auto-updates:
 
 ## License
 
-Copyright (C) 2025 Futurity Technologies Pte Ltd
+pg-dump-cache Copyright (C) 2026 Futurity Technologies Pte Ltd
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 3.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
 
-See [LICENSE](LICENSE) for the full license text.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+A copy of the GNU General Public License, version 3, is included
+in the [LICENSE](LICENSE) file.
