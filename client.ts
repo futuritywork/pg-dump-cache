@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+const startTime = performance.now();
+
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,6 +33,7 @@ const { values } = parseArgs({
     status: { type: "boolean", short: "s", default: false },
     help: { type: "boolean", short: "h", default: false },
     "no-update-check": { type: "boolean", default: false },
+    "force-update": { type: "boolean", short: "u", default: false },
   },
 });
 
@@ -45,6 +48,7 @@ Options:
   -f, --fresh          Force refresh before fetching
   -s, --status         Show server status and exit
   -h, --help           Show this help
+  -u, --force-update   Force update check (ignore 24h TTL)
   --no-update-check    Disable auto-update check for this invocation
 
 Environment variables:
@@ -168,7 +172,7 @@ async function isInSourceRepo(): Promise<boolean> {
   }
 }
 
-async function checkForUpdates(): Promise<void> {
+async function checkForUpdates(force = false): Promise<void> {
   if (NO_UPDATE_CHECK || values["no-update-check"]) {
     return;
   }
@@ -179,15 +183,17 @@ async function checkForUpdates(): Promise<void> {
       return;
     }
 
-    // Check if we've checked recently
-    try {
-      const stats = await stat(UPDATE_CHECK_FILE);
-      const lastCheck = stats.mtimeMs;
-      if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL) {
-        return;
+    // Check if we've checked recently (skip if forced)
+    if (!force) {
+      try {
+        const stats = await stat(UPDATE_CHECK_FILE);
+        const lastCheck = stats.mtimeMs;
+        if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL) {
+          return;
+        }
+      } catch {
+        // File doesn't exist, proceed with check
       }
-    } catch {
-      // File doesn't exist, proceed with check
     }
 
     // Ensure config directory exists
@@ -209,7 +215,7 @@ async function checkForUpdates(): Promise<void> {
 
     // Compare and update if different
     if (remoteContent !== localContent) {
-      console.log("Updating client.ts to latest version...");
+      console.log(`Updating client in place: ${localPath}`);
       await writeFile(localPath, remoteContent);
       console.log("Update complete. Re-running with new version...");
 
@@ -232,7 +238,7 @@ async function checkForUpdates(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  await checkForUpdates();
+  await checkForUpdates(values["force-update"]);
 
   if (values.status) {
     const status = await getStatus();
@@ -257,7 +263,8 @@ async function main(): Promise<void> {
     await cleanup(tempDir);
   }
 
-  console.log("Done!");
+  const elapsed = Math.round(performance.now() - startTime);
+  console.log(`Done! Took ${elapsed} ms`);
 }
 
 main().catch((error) => {
