@@ -1,14 +1,13 @@
 #!/usr/bin/env bun
 
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
 const CACHE_SERVER_URL =
   process.env.CACHE_SERVER_URL ?? "http://localhost:3000";
 const LOCAL_DB_URL = process.env.LOCAL_DB_URL;
-const OUTPUT_DIR = process.env.OUTPUT_DIR ?? "./dumps";
-const KEEP_COUNT = Number(process.env.KEEP_COUNT ?? 3);
 const API_KEY = process.env.API_KEY;
 
 if (!API_KEY) {
@@ -43,8 +42,6 @@ Environment variables:
   CACHE_SERVER_URL  Server URL (default: http://localhost:3000)
   API_KEY           Shared API key for authentication (required)
   LOCAL_DB_URL      Local PostgreSQL connection string (required for restore)
-  OUTPUT_DIR        Directory to store downloaded dumps (default: ./dumps)
-  KEEP_COUNT        Number of dumps to retain locally (default: 3)
 `);
   process.exit(0);
 }
@@ -78,8 +75,11 @@ async function triggerRefresh(): Promise<void> {
   console.log("Refresh completed");
 }
 
-async function downloadDump(wait: boolean): Promise<string> {
-  await mkdir(OUTPUT_DIR, { recursive: true });
+async function downloadDump(
+  wait: boolean,
+): Promise<{ dumpPath: string; tempDir: string }> {
+  const tempDir = join(tmpdir(), `pg-dump-cache-${Date.now()}`);
+  await mkdir(tempDir, { recursive: true });
 
   const url = new URL(`${CACHE_SERVER_URL}/dump`);
   if (wait) url.searchParams.set("wait", "true");
@@ -98,16 +98,15 @@ async function downloadDump(wait: boolean): Promise<string> {
   const timestamp = res.headers.get("X-Cache-Timestamp");
   console.log(`Cache age: ${ageMinutes} minutes (from ${timestamp})`);
 
-  const filename = `dump-${Date.now()}.dump`;
-  const filepath = join(OUTPUT_DIR, filename);
+  const dumpPath = join(tempDir, "dump.dump");
 
   const data = await res.arrayBuffer();
-  await Bun.write(filepath, data);
+  await Bun.write(dumpPath, data);
 
   console.log(
-    `Downloaded ${(data.byteLength / 1024 / 1024).toFixed(2)} MB to ${filepath}`,
+    `Downloaded ${(data.byteLength / 1024 / 1024).toFixed(2)} MB to ${dumpPath}`,
   );
-  return filepath;
+  return { dumpPath, tempDir };
 }
 
 async function restoreDump(dumpPath: string): Promise<void> {
@@ -143,23 +142,9 @@ async function restoreDump(dumpPath: string): Promise<void> {
   console.log("Restore completed");
 }
 
-async function cleanupOldDumps(): Promise<void> {
-  const files = await readdir(OUTPUT_DIR);
-  const dumpFiles = files
-    .filter((f) => f.endsWith(".dump"))
-    .map((f) => {
-      const match = f.match(/^dump-(\d+)\.dump$/);
-      return match ? { file: f, timestamp: Number(match[1]) } : null;
-    })
-    .filter((x): x is { file: string; timestamp: number } => x !== null)
-    .sort((a, b) => b.timestamp - a.timestamp);
-
-  const toDelete = dumpFiles.slice(KEEP_COUNT);
-  for (const { file } of toDelete) {
-    const path = join(OUTPUT_DIR, file);
-    console.log(`Cleaning up old dump: ${path}`);
-    await rm(path);
-  }
+async function cleanup(tempDir: string): Promise<void> {
+  console.log(`Cleaning up temp directory: ${tempDir}`);
+  await rm(tempDir, { recursive: true });
 }
 
 async function main(): Promise<void> {
@@ -180,9 +165,12 @@ async function main(): Promise<void> {
     await triggerRefresh();
   }
 
-  const dumpPath = await downloadDump(values.wait ?? false);
-  await restoreDump(dumpPath);
-  await cleanupOldDumps();
+  const { dumpPath, tempDir } = await downloadDump(values.wait ?? false);
+  try {
+    await restoreDump(dumpPath);
+  } finally {
+    await cleanup(tempDir);
+  }
 
   console.log("Done!");
 }
