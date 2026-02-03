@@ -187,12 +187,22 @@ Bun.serve({
     }
 
     if (req.method === "GET" && url.pathname === "/dump") {
+      const requestStart = performance.now();
+      const ip =
+        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        req.headers.get("x-real-ip") ??
+        "unknown";
       const wait = url.searchParams.get("wait") === "true";
+      let waited = false;
 
       if (wait) {
+        waited = needsRefresh(ttl);
         try {
           await ensureFreshCache(ttl);
         } catch {
+          console.log(
+            `[DUMP] ip=${ip} error="Refresh failed" waited=${waited}`,
+          );
           return new Response("Refresh failed", { status: 500 });
         }
       } else {
@@ -200,6 +210,9 @@ Bun.serve({
       }
 
       if (!latestCache) {
+        console.log(
+          `[DUMP] ip=${ip} error="No cache available" waited=${waited}`,
+        );
         return Response.json(
           { error: "No cached dump available", retryable: true },
           { status: 503 },
@@ -211,17 +224,27 @@ Bun.serve({
 
       if (!exists) {
         latestCache = null;
+        console.log(
+          `[DUMP] ip=${ip} error="Cache file missing" waited=${waited}`,
+        );
         return Response.json(
           { error: "Cache file missing", retryable: true },
           { status: 503 },
         );
       }
 
+      const cacheAgeSeconds = Math.round(getCacheAgeSeconds());
+      const durationMs = Math.round(performance.now() - requestStart);
+      const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+      console.log(
+        `[DUMP] ip=${ip} size=${sizeMB}MB cache_age=${cacheAgeSeconds}s waited=${waited} duration=${durationMs}ms`,
+      );
+
       return new Response(file, {
         headers: {
           "Content-Type": "application/gzip",
           "Content-Disposition": `attachment; filename="${latestCache.path.split("/").pop()}"`,
-          "X-Cache-Age-Minutes": String(Math.round(getCacheAgeSeconds() / 60)),
+          "X-Cache-Age-Minutes": String(Math.round(cacheAgeSeconds / 60)),
           "X-Cache-Timestamp": latestCache.timestamp.toISOString(),
         },
       });
