@@ -1,9 +1,16 @@
 #!/usr/bin/env bun
 
-import { mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+
+const GITHUB_RAW_URL =
+  "https://raw.githubusercontent.com/futuritywork/pg-dump-cache/main/client.ts";
+const CONFIG_DIR = join(homedir(), ".config", "pg-dump-cache");
+const UPDATE_CHECK_FILE = join(CONFIG_DIR, "update-checked");
+const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours in ms
+const NO_UPDATE_CHECK = process.env.DUMP_CACHE_NO_UPDATE_CHECK === "1";
 
 const CACHE_SERVER_URL =
   process.env.CACHE_SERVER_URL ?? "http://localhost:3000";
@@ -23,6 +30,7 @@ const { values } = parseArgs({
     fresh: { type: "boolean", short: "f", default: false },
     status: { type: "boolean", short: "s", default: false },
     help: { type: "boolean", short: "h", default: false },
+    "no-update-check": { type: "boolean", default: false },
   },
 });
 
@@ -33,15 +41,17 @@ pg-dump-cache client - Fetch and restore PostgreSQL dumps
 Usage: ./client.ts [options]
 
 Options:
-  -w, --wait    Wait for fresh dump if cache is stale
-  -f, --fresh   Force refresh before fetching
-  -s, --status  Show server status and exit
-  -h, --help    Show this help
+  -w, --wait           Wait for fresh dump if cache is stale
+  -f, --fresh          Force refresh before fetching
+  -s, --status         Show server status and exit
+  -h, --help           Show this help
+  --no-update-check    Disable auto-update check for this invocation
 
 Environment variables:
-  CACHE_SERVER_URL  Server URL (default: http://localhost:3000)
-  API_KEY           Shared API key for authentication (required)
-  LOCAL_DB_URL      Local PostgreSQL connection string (required for restore)
+  CACHE_SERVER_URL           Server URL (default: http://localhost:3000)
+  API_KEY                    Shared API key for authentication (required)
+  LOCAL_DB_URL               Local PostgreSQL connection string (required for restore)
+  DUMP_CACHE_NO_UPDATE_CHECK Set to 1 to disable auto-update checks
 `);
   process.exit(0);
 }
@@ -147,7 +157,67 @@ async function cleanup(tempDir: string): Promise<void> {
   await rm(tempDir, { recursive: true });
 }
 
+async function checkForUpdates(): Promise<void> {
+  if (NO_UPDATE_CHECK || values["no-update-check"]) {
+    return;
+  }
+
+  try {
+    // Check if we've checked recently
+    try {
+      const stats = await stat(UPDATE_CHECK_FILE);
+      const lastCheck = stats.mtimeMs;
+      if (Date.now() - lastCheck < UPDATE_CHECK_INTERVAL) {
+        return;
+      }
+    } catch {
+      // File doesn't exist, proceed with check
+    }
+
+    // Ensure config directory exists
+    await mkdir(CONFIG_DIR, { recursive: true });
+
+    // Fetch remote version
+    const res = await fetch(GITHUB_RAW_URL);
+    if (!res.ok) {
+      return; // Silently fail on network errors
+    }
+    const remoteContent = await res.text();
+
+    // Read local version
+    const localPath = import.meta.path;
+    const localContent = await readFile(localPath, "utf-8");
+
+    // Update timestamp file
+    await writeFile(UPDATE_CHECK_FILE, new Date().toISOString());
+
+    // Compare and update if different
+    if (remoteContent !== localContent) {
+      console.log("Updating client.ts to latest version...");
+      await writeFile(localPath, remoteContent);
+      console.log("Update complete. Re-running with new version...");
+
+      // Re-execute with --no-update-check to prevent infinite loop
+      const args = [...process.argv.slice(1), "--no-update-check"];
+      const proc = Bun.spawn(["bun", ...args], {
+        stdout: "inherit",
+        stderr: "inherit",
+        stdin: "inherit",
+      });
+      const exitCode = await proc.exited;
+      process.exit(exitCode);
+    }
+  } catch (error) {
+    // Silently continue on any errors
+    if (process.env.DEBUG) {
+      console.warn("Update check failed:", error);
+    }
+  }
+}
+
 async function main(): Promise<void> {
+  await checkForUpdates();
+
   if (values.status) {
     const status = await getStatus();
     console.log("Server status:");
