@@ -152,6 +152,11 @@ function triggerRefresh(ttl: number = TTL): void {
 
 await loadExistingDumps();
 
+if (!latestCache) {
+  console.log("No existing cache found, fetching initial dump...");
+  await ensureFreshCache(0);
+}
+
 Bun.serve({
   port: PORT,
   async fetch(req) {
