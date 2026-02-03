@@ -14,7 +14,7 @@ const NO_UPDATE_CHECK = process.env.DUMP_CACHE_NO_UPDATE_CHECK === "1";
 
 const CACHE_SERVER_URL =
   process.env.CACHE_SERVER_URL ?? "http://localhost:3000";
-const LOCAL_DB_URL = process.env.LOCAL_DB_URL;
+const LOCAL_DB_URL = process.env.DATABASE_URL;
 const API_KEY = process.env.API_KEY;
 
 if (!API_KEY) {
