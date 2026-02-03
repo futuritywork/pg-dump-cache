@@ -95,7 +95,7 @@ async function downloadDump(
   if (wait) url.searchParams.set("wait", "true");
 
   console.log(`Fetching dump from ${url}...`);
-  const downloadStart = Date.now();
+  const downloadStart = performance.now();
   const res = await fetch(url, { headers });
 
   if (!res.ok) {
@@ -114,7 +114,9 @@ async function downloadDump(
   const data = await res.arrayBuffer();
   await Bun.write(dumpPath, data);
 
-  const downloadSeconds = ((Date.now() - downloadStart) / 1000).toFixed(1);
+  const downloadSeconds = ((performance.now() - downloadStart) / 1000).toFixed(
+    1,
+  );
   console.log(
     `Downloaded ${(data.byteLength / 1024 / 1024).toFixed(2)} MB in ${downloadSeconds}s`,
   );
@@ -129,7 +131,7 @@ async function restoreDump(dumpPath: string): Promise<void> {
 
   console.log(`Restoring to ${LOCAL_DB_URL.replace(/:[^:@]+@/, ":***@")}...`);
 
-  const restoreStart = Date.now();
+  const restoreStart = performance.now();
   const proc = Bun.spawn(
     [
       "pg_restore",
@@ -147,7 +149,7 @@ async function restoreDump(dumpPath: string): Promise<void> {
   );
 
   const exitCode = await proc.exited;
-  const restoreSeconds = ((Date.now() - restoreStart) / 1000).toFixed(1);
+  const restoreSeconds = ((performance.now() - restoreStart) / 1000).toFixed(1);
 
   if (exitCode !== 0) {
     throw new Error(`pg_restore failed with exit code ${exitCode}`);
