@@ -9,6 +9,14 @@ const CACHE_SERVER_URL =
 const LOCAL_DB_URL = process.env.LOCAL_DB_URL;
 const OUTPUT_DIR = process.env.OUTPUT_DIR ?? "./dumps";
 const KEEP_COUNT = Number(process.env.KEEP_COUNT ?? 3);
+const API_KEY = process.env.API_KEY;
+
+if (!API_KEY) {
+  console.error("API_KEY environment variable is required");
+  process.exit(1);
+}
+
+const headers = { Authorization: `Bearer ${API_KEY}` };
 
 const { values } = parseArgs({
   options: {
@@ -33,6 +41,7 @@ Options:
 
 Environment variables:
   CACHE_SERVER_URL  Server URL (default: http://localhost:3000)
+  API_KEY           Shared API key for authentication (required)
   LOCAL_DB_URL      Local PostgreSQL connection string (required for restore)
   OUTPUT_DIR        Directory to store downloaded dumps (default: ./dumps)
   KEEP_COUNT        Number of dumps to retain locally (default: 3)
@@ -47,7 +56,7 @@ async function getStatus(): Promise<{
   refreshing: boolean;
   ttl: number;
 }> {
-  const res = await fetch(`${CACHE_SERVER_URL}/status`);
+  const res = await fetch(`${CACHE_SERVER_URL}/status`, { headers });
   if (!res.ok) {
     throw new Error(`Status check failed: ${res.status} ${res.statusText}`);
   }
@@ -56,7 +65,10 @@ async function getStatus(): Promise<{
 
 async function triggerRefresh(): Promise<void> {
   console.log("Triggering refresh...");
-  const res = await fetch(`${CACHE_SERVER_URL}/refresh`, { method: "POST" });
+  const res = await fetch(`${CACHE_SERVER_URL}/refresh`, {
+    method: "POST",
+    headers,
+  });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(
@@ -73,7 +85,7 @@ async function downloadDump(wait: boolean): Promise<string> {
   if (wait) url.searchParams.set("wait", "true");
 
   console.log(`Fetching dump from ${url}...`);
-  const res = await fetch(url);
+  const res = await fetch(url, { headers });
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

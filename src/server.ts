@@ -6,9 +6,15 @@ const CACHE_DIR = process.env.CACHE_DIR ?? "./cache";
 const TTL = Number(process.env.TTL ?? 3600);
 const PORT = Number(process.env.PORT ?? 3000);
 const KEEP_COUNT = Number(process.env.KEEP_COUNT ?? 3);
+const API_KEY = process.env.API_KEY;
 
 if (!DATABASE_URL) {
   console.error("DATABASE_URL environment variable is required");
+  process.exit(1);
+}
+
+if (!API_KEY) {
+  console.error("API_KEY environment variable is required");
   process.exit(1);
 }
 
@@ -160,6 +166,13 @@ if (!latestCache) {
 Bun.serve({
   port: PORT,
   async fetch(req) {
+    const authHeader = req.headers.get("Authorization");
+    const token = authHeader?.replace(/^Bearer\s+/i, "");
+
+    if (token !== API_KEY) {
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
     const url = new URL(req.url);
     const ttl = Number(url.searchParams.get("ttl") ?? TTL);
 
