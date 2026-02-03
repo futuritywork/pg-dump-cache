@@ -157,12 +157,35 @@ async function cleanup(tempDir: string): Promise<void> {
   await rm(tempDir, { recursive: true });
 }
 
+async function isInSourceRepo(): Promise<boolean> {
+  try {
+    const scriptDir = import.meta.dir;
+    const gitDir = join(scriptDir, ".git");
+    await stat(gitDir);
+    // .git exists, check if it's the source repo
+    const proc = Bun.spawn(["git", "remote", "get-url", "origin"], {
+      cwd: scriptDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const output = await new Response(proc.stdout).text();
+    return output.includes("futuritywork/pg-dump-cache");
+  } catch {
+    return false;
+  }
+}
+
 async function checkForUpdates(): Promise<void> {
   if (NO_UPDATE_CHECK || values["no-update-check"]) {
     return;
   }
 
   try {
+    // Skip update if running from the source repository
+    if (await isInSourceRepo()) {
+      return;
+    }
+
     // Check if we've checked recently
     try {
       const stats = await stat(UPDATE_CHECK_FILE);
