@@ -184,6 +184,7 @@ console.log(`[STARTUP] Ready in ${startupMs}ms`);
 
 Bun.serve({
   port: PORT,
+  idleTimeout: 255,
   async fetch(req) {
     const authHeader = req.headers.get("Authorization");
     const token = authHeader?.replace(/^Bearer\s+/i, "");
