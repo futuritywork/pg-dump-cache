@@ -1,5 +1,6 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
+import pino from "pino";
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const CACHE_DIR = process.env.CACHE_DIR ?? "./cache";
@@ -8,13 +9,15 @@ const PORT = Number(process.env.PORT ?? 3000);
 const KEEP_COUNT = Number(process.env.KEEP_COUNT ?? 3);
 const API_KEY = process.env.API_KEY;
 
+const log = pino({ name: "pg-dump-cache" });
+
 if (!DATABASE_URL) {
-  console.error("DATABASE_URL environment variable is required");
+  log.fatal("DATABASE_URL environment variable is required");
   process.exit(1);
 }
 
 if (!API_KEY) {
-  console.error("API_KEY environment variable is required");
+  log.fatal("API_KEY environment variable is required");
   process.exit(1);
 }
 
@@ -53,8 +56,9 @@ async function loadExistingDumps(): Promise<void> {
 
   if (dumpFiles.length > 0) {
     latestCache = dumpFiles[0];
-    console.log(
-      `Loaded existing cache from ${latestCache.path} (age: ${Math.round(getCacheAgeSeconds())}s)`,
+    log.info(
+      { path: latestCache.path, ageSeconds: Math.round(getCacheAgeSeconds()) },
+      "loaded existing cache",
     );
   }
 }
@@ -64,7 +68,7 @@ async function performDump(): Promise<CacheEntry> {
   const filename = `dump-${timestamp.getTime()}.tar.gz`;
   const filepath = join(CACHE_DIR, filename);
 
-  console.log(`Starting pg_dump to ${filepath}...`);
+  log.info({ filepath }, "starting pg_dump");
 
   const proc = Bun.spawn(
     [
@@ -90,8 +94,9 @@ async function performDump(): Promise<CacheEntry> {
   }
 
   await Bun.write(filepath, output);
-  console.log(
-    `pg_dump completed: ${filepath} (${(output.byteLength / 1024 / 1024).toFixed(2)} MB)`,
+  log.info(
+    { filepath, sizeMB: Number((output.byteLength / 1024 / 1024).toFixed(2)) },
+    "pg_dump completed",
   );
 
   return { path: filepath, timestamp };
@@ -111,7 +116,7 @@ async function cleanupOldDumps(): Promise<void> {
   const toDelete = dumpFiles.slice(KEEP_COUNT);
   for (const { file } of toDelete) {
     const path = join(CACHE_DIR, file);
-    console.log(`Cleaning up old dump: ${path}`);
+    log.info({ path }, "cleaning up old dump");
     await rm(path);
   }
 }
@@ -121,7 +126,7 @@ async function doRefresh(): Promise<void> {
     latestCache = await performDump();
     await cleanupOldDumps();
   } catch (error) {
-    console.error("Refresh failed:", error);
+    log.error({ err: error }, "refresh failed");
     throw error;
   }
 }
@@ -157,30 +162,33 @@ function triggerRefresh(ttl: number = TTL): void {
 }
 
 const startupStart = performance.now();
-console.log("[STARTUP] Initializing...");
+log.info("initializing");
 
 await loadExistingDumps();
 
 if (latestCache) {
   const ageSeconds = Math.round(getCacheAgeSeconds());
   const isStale = needsRefresh();
-  console.log(
-    `[STARTUP] Found existing cache: age=${ageSeconds}s stale=${isStale}`,
-  );
+  log.info({ ageSeconds, isStale }, "found existing cache");
   if (isStale) {
-    console.log("[STARTUP] Cache is stale, queuing background refresh...");
+    log.info("cache is stale, queuing background refresh");
     triggerRefresh();
   }
 } else {
-  console.log("[STARTUP] No existing cache found, fetching initial dump...");
+  log.info("no existing cache found, fetching initial dump");
   await ensureFreshCache(0);
-  console.log(
-    `[STARTUP] Initial dump complete: ${((performance.now() - startupStart) / 1000).toFixed(1)}s`,
+  log.info(
+    {
+      durationSeconds: Number(
+        ((performance.now() - startupStart) / 1000).toFixed(1),
+      ),
+    },
+    "initial dump complete",
   );
 }
 
 const startupMs = Math.round(performance.now() - startupStart);
-console.log(`[STARTUP] Ready in ${startupMs}ms`);
+log.info({ startupMs }, "ready");
 
 Bun.serve({
   port: PORT,
@@ -222,8 +230,9 @@ Bun.serve({
         try {
           await ensureFreshCache(0);
         } catch {
-          console.log(
-            `[DUMP] ip=${ip} error="Refresh failed" fresh=true waited=${waited}`,
+          log.error(
+            { ip, fresh: true, waited },
+            "refresh failed during dump request",
           );
           return new Response("Refresh failed", { status: 500 });
         }
@@ -232,9 +241,7 @@ Bun.serve({
         try {
           await ensureFreshCache(ttl);
         } catch {
-          console.log(
-            `[DUMP] ip=${ip} error="Refresh failed" waited=${waited}`,
-          );
+          log.error({ ip, waited }, "refresh failed during dump request");
           return new Response("Refresh failed", { status: 500 });
         }
       } else {
@@ -242,9 +249,7 @@ Bun.serve({
       }
 
       if (!latestCache) {
-        console.log(
-          `[DUMP] ip=${ip} error="No cache available" waited=${waited}`,
-        );
+        log.warn({ ip, waited }, "no cache available");
         return Response.json(
           { error: "No cached dump available", retryable: true },
           { status: 503 },
@@ -256,9 +261,7 @@ Bun.serve({
 
       if (!exists) {
         latestCache = null;
-        console.log(
-          `[DUMP] ip=${ip} error="Cache file missing" waited=${waited}`,
-        );
+        log.error({ ip, waited }, "cache file missing");
         return Response.json(
           { error: "Cache file missing", retryable: true },
           { status: 503 },
@@ -267,9 +270,10 @@ Bun.serve({
 
       const cacheAgeSeconds = Math.round(getCacheAgeSeconds());
       const durationMs = Math.round(performance.now() - requestStart);
-      const sizeMB = (file.size / 1024 / 1024).toFixed(2);
-      console.log(
-        `[DUMP] ip=${ip} size=${sizeMB}MB cache_age=${cacheAgeSeconds}s fresh=${fresh} waited=${waited} duration=${durationMs}ms`,
+      const sizeMB = Number((file.size / 1024 / 1024).toFixed(2));
+      log.info(
+        { ip, sizeMB, cacheAgeSeconds, fresh, waited, durationMs },
+        "dump served",
       );
 
       return new Response(file, {
@@ -308,8 +312,13 @@ Bun.serve({
   },
 });
 
-console.log(`pg-dump-cache server listening on port ${PORT}`);
-console.log(`  DATABASE_URL: ${DATABASE_URL.replace(/:[^:@]+@/, ":***@")}`);
-console.log(`  CACHE_DIR: ${CACHE_DIR}`);
-console.log(`  TTL: ${TTL}s`);
-console.log(`  KEEP_COUNT: ${KEEP_COUNT}`);
+log.info(
+  {
+    port: PORT,
+    databaseUrl: DATABASE_URL.replace(/:[^:@]+@/, ":***@"),
+    cacheDir: CACHE_DIR,
+    ttl: TTL,
+    keepCount: KEEP_COUNT,
+  },
+  "server listening",
+);
