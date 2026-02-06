@@ -1,25 +1,11 @@
 import { mkdir, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import pino from "pino";
+import { env } from "./env.js";
 
-const DATABASE_URL = process.env.DATABASE_URL;
-const CACHE_DIR = process.env.CACHE_DIR ?? "./cache";
-const TTL = Number(process.env.TTL ?? 3600);
-const PORT = Number(process.env.PORT ?? 3000);
-const KEEP_COUNT = Number(process.env.KEEP_COUNT ?? 3);
-const API_KEY = process.env.API_KEY;
+const { DATABASE_URL, API_KEY, CACHE_DIR, TTL, PORT, KEEP_COUNT } = env;
 
 const log = pino({ name: "pg-dump-cache" });
-
-if (!DATABASE_URL) {
-  log.fatal("DATABASE_URL environment variable is required");
-  process.exit(1);
-}
-
-if (!API_KEY) {
-  log.fatal("API_KEY environment variable is required");
-  process.exit(1);
-}
 
 type CacheEntry = {
   path: string;
@@ -77,7 +63,7 @@ async function performDump(): Promise<CacheEntry> {
       "--no-acl",
       "--format=custom",
       "--compress=6",
-      DATABASE_URL!,
+      DATABASE_URL,
     ],
     {
       stdout: "pipe",
