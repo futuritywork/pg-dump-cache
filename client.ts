@@ -6,6 +6,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import z from "zod";
 
 const GITHUB_RAW_URL =
   "https://raw.githubusercontent.com/futuritywork/pg-dump-cache/main/client.ts";
@@ -14,8 +15,9 @@ const UPDATE_CHECK_FILE = join(CONFIG_DIR, "update-checked");
 const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours in ms
 const NO_UPDATE_CHECK = process.env.DUMP_CACHE_NO_UPDATE_CHECK === "1";
 
-const CACHE_SERVER_URL =
-  process.env.CACHE_SERVER_URL ?? "http://localhost:3000";
+const CACHE_SERVER_URL = new URL(
+  process.env.CACHE_SERVER_URL ?? "http://localhost:3000"
+);
 const LOCAL_DB_URL = process.env.DATABASE_URL;
 const API_KEY = process.env.API_KEY;
 
@@ -60,6 +62,14 @@ Environment variables:
   process.exit(0);
 }
 
+const Z_Status = z.object({
+  hasCache: z.boolean(),
+  cacheTimestamp: z.string().nullable(),
+  cacheAgeSeconds: z.number().nullable(),
+  refreshing: z.boolean(),
+  ttl: z.number(),
+});
+
 async function getStatus(): Promise<{
   hasCache: boolean;
   cacheTimestamp: string | null;
@@ -67,11 +77,11 @@ async function getStatus(): Promise<{
   refreshing: boolean;
   ttl: number;
 }> {
-  const res = await fetch(`${CACHE_SERVER_URL}/status`, { headers });
+  const res = await fetch(`${CACHE_SERVER_URL}status`, { headers });
   if (!res.ok) {
     throw new Error(`Status check failed: ${res.status} ${res.statusText}`);
   }
-  return res.json();
+  return Z_Status.parse(await res.json());
 }
 
 async function downloadDump(options: {
@@ -81,7 +91,7 @@ async function downloadDump(options: {
   const tempDir = join(tmpdir(), `pg-dump-cache-${Date.now()}`);
   await mkdir(tempDir, { recursive: true });
 
-  const url = new URL(`${CACHE_SERVER_URL}/dump`);
+  const url = new URL(`${CACHE_SERVER_URL}dump`);
   if (options.fresh) url.searchParams.set("fresh", "true");
   else if (options.wait) url.searchParams.set("wait", "true");
 
@@ -90,7 +100,7 @@ async function downloadDump(options: {
   const res = await fetch(url, { headers });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
+    const body = await res.json().catch(() => ({})) as { error?: unknown };
     throw new Error(
       `Download failed: ${res.status} ${body.error ?? res.statusText}`,
     );
