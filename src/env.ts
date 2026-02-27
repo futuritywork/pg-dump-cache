@@ -9,6 +9,15 @@ export const env = createEnv({
     TTL: z.coerce.number().int().positive().default(3600),
     PORT: z.coerce.number().int().positive().default(3000),
     KEEP_COUNT: z.coerce.number().int().positive().default(3),
+    EXCLUDE_TABLES: z
+      .string()
+      .default("")
+      .transform((s) =>
+        s
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean),
+      ),
   },
   runtimeEnv: process.env,
 });

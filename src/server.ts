@@ -3,7 +3,15 @@ import { join } from "node:path";
 import pino from "pino";
 import { env } from "./env.js";
 
-const { DATABASE_URL, API_KEY, CACHE_DIR, TTL, PORT, KEEP_COUNT } = env;
+const {
+  DATABASE_URL,
+  API_KEY,
+  CACHE_DIR,
+  TTL,
+  PORT,
+  KEEP_COUNT,
+  EXCLUDE_TABLES,
+} = env;
 
 const log = pino({ name: "pg-dump-cache" });
 
@@ -63,6 +71,7 @@ async function performDump(): Promise<CacheEntry> {
       "--no-acl",
       "--format=custom",
       "--compress=6",
+      ...EXCLUDE_TABLES.flatMap((t) => ["--exclude-table", t]),
       DATABASE_URL,
     ],
     {
@@ -305,6 +314,7 @@ log.info(
     cacheDir: CACHE_DIR,
     ttl: TTL,
     keepCount: KEEP_COUNT,
+    excludeTables: EXCLUDE_TABLES,
   },
   "server listening",
 );
