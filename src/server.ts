@@ -217,136 +217,117 @@ Bun.serve({
         "unknown";
       const wait = url.searchParams.get("wait") === "true";
       const fresh = url.searchParams.get("fresh") === "true";
-      let waited = false;
 
-      if (fresh) {
-        // Force a brand new dump and wait for it
-        waited = true;
-        try {
-          await ensureFreshCache(0);
-        } catch {
-          log.error(
-            { ip, fresh: true, waited },
-            "refresh failed during dump request",
-          );
-          return new Response("Refresh failed", { status: 500 });
-        }
-      } else if (wait) {
-        waited = needsRefresh(ttl);
-        try {
-          await ensureFreshCache(ttl);
-        } catch {
-          log.error({ ip, waited }, "refresh failed during dump request");
-          return new Response("Refresh failed", { status: 500 });
-        }
-      } else if (getCacheAgeSeconds() > 3600) {
-        // Cache older than 60m — stream status updates, then the dump
-        const ageMin = Math.round(getCacheAgeSeconds() / 60);
-        log.info({ ip, ageMin }, "cache >60m, streaming fresh dump");
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(controller) {
+          const status = (msg: string) =>
+            controller.enqueue(
+              enc.encode(`${JSON.stringify({ status: msg })}\n`),
+            );
 
-        const enc = new TextEncoder();
-        const stream = new ReadableStream({
-          async start(controller) {
-            const status = (msg: string) =>
-              controller.enqueue(
-                enc.encode(`${JSON.stringify({ status: msg })}\n`),
-              );
-
-            status(`Cache is ${ageMin}m old — refreshing...`);
-
+          // --- refresh phase ---
+          if (fresh) {
+            status("Forcing fresh dump...");
             const t0 = performance.now();
             try {
               await ensureFreshCache(0);
             } catch (err) {
               status("Refresh failed");
-              log.error(
-                { ip, err },
-                "refresh failed during streaming dump request",
-              );
+              log.error({ ip, err }, "refresh failed (fresh)");
               controller.close();
               return;
             }
-
-            const secs = ((performance.now() - t0) / 1000).toFixed(1);
-            const cacheAge = Math.round(getCacheAgeSeconds());
-            const ts = latestCache!.timestamp.toISOString();
-            status(`Done in ${secs}s — cache age: ${cacheAge}s (${ts})`);
-
-            // Null-byte delimiter between status and binary data
-            controller.enqueue(new Uint8Array([0x00, 0x0a]));
-
-            // Stream the dump file
-            const reader = Bun.file(latestCache!.path).stream().getReader();
-            for (;;) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              controller.enqueue(value);
+            status(
+              `Fresh dump completed in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+            );
+          } else if (getCacheAgeSeconds() > 3600) {
+            const ageMin = Math.round(getCacheAgeSeconds() / 60);
+            status(`Cache is ${ageMin}m old — refreshing...`);
+            const t0 = performance.now();
+            try {
+              await ensureFreshCache(0);
+            } catch (err) {
+              status("Refresh failed");
+              log.error({ ip, err }, "refresh failed (stale >60m)");
+              controller.close();
+              return;
             }
-
-            const durationMs = Math.round(performance.now() - requestStart);
-            const sizeMB = Number(
-              (Bun.file(latestCache!.path).size / 1024 / 1024).toFixed(2),
+            status(
+              `Fresh dump completed in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
             );
-            log.info(
-              {
-                ip,
-                sizeMB,
-                cacheAgeSeconds: cacheAge,
-                fresh: true,
-                waited: true,
-                durationMs,
-              },
-              "streaming dump served",
-            );
+          } else if (wait) {
+            if (needsRefresh(ttl)) {
+              status("Cache is stale — refreshing...");
+              const t0 = performance.now();
+              try {
+                await ensureFreshCache(ttl);
+              } catch (err) {
+                status("Refresh failed");
+                log.error({ ip, err }, "refresh failed (wait)");
+                controller.close();
+                return;
+              }
+              status(
+                `Refresh completed in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+              );
+            } else {
+              status("Cache is fresh");
+            }
+          } else {
+            triggerRefresh(ttl);
+            if (refreshing) {
+              status("Refreshing in background");
+            }
+          }
 
+          // --- validate cache ---
+          if (!latestCache) {
+            status("No cache available");
+            log.warn({ ip }, "no cache available");
             controller.close();
-          },
-        });
+            return;
+          }
 
-        return new Response(stream, {
-          headers: {
-            "Content-Type": "application/octet-stream",
-            "X-Status-Stream": "true",
-          },
-        });
-      } else {
-        triggerRefresh(ttl);
-      }
+          const file = Bun.file(latestCache.path);
+          if (!(await file.exists())) {
+            latestCache = null;
+            status("Cache file missing");
+            log.error({ ip }, "cache file missing");
+            controller.close();
+            return;
+          }
 
-      if (!latestCache) {
-        log.warn({ ip, waited }, "no cache available");
-        return Response.json(
-          { error: "No cached dump available", retryable: true },
-          { status: 503 },
-        );
-      }
+          // --- send file info + binary data ---
+          const cacheAge = Math.round(getCacheAgeSeconds());
+          const sizeMB = Number((file.size / 1024 / 1024).toFixed(2));
+          status(
+            `Sending ${sizeMB} MB (age: ${cacheAge}s, ${latestCache.timestamp.toISOString()})`,
+          );
 
-      const file = Bun.file(latestCache.path);
-      const exists = await file.exists();
+          controller.enqueue(new Uint8Array([0x00, 0x0a]));
 
-      if (!exists) {
-        latestCache = null;
-        log.error({ ip, waited }, "cache file missing");
-        return Response.json(
-          { error: "Cache file missing", retryable: true },
-          { status: 503 },
-        );
-      }
+          const reader = file.stream().getReader();
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            controller.enqueue(value);
+          }
 
-      const cacheAgeSeconds = Math.round(getCacheAgeSeconds());
-      const durationMs = Math.round(performance.now() - requestStart);
-      const sizeMB = Number((file.size / 1024 / 1024).toFixed(2));
-      log.info(
-        { ip, sizeMB, cacheAgeSeconds, fresh, waited, durationMs },
-        "dump served",
-      );
+          const durationMs = Math.round(performance.now() - requestStart);
+          log.info(
+            { ip, sizeMB, cacheAgeSeconds: cacheAge, fresh, wait, durationMs },
+            "dump served",
+          );
 
-      return new Response(file, {
+          controller.close();
+        },
+      });
+
+      return new Response(stream, {
         headers: {
-          "Content-Type": "application/gzip",
-          "Content-Disposition": `attachment; filename="${latestCache.path.split("/").pop()}"`,
-          "X-Cache-Age-Minutes": String(Math.round(cacheAgeSeconds / 60)),
-          "X-Cache-Timestamp": latestCache.timestamp.toISOString(),
+          "Content-Type": "application/octet-stream",
+          "X-Status-Stream": "true",
         },
       });
     }

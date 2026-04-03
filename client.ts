@@ -84,6 +84,18 @@ async function getStatus(): Promise<{
   return Z_Status.parse(await res.json());
 }
 
+function formatBytes(bytes: number): string {
+  const mb = bytes / 1024 / 1024;
+  return mb >= 1000 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(2)} MB`;
+}
+
+function formatSpeed(bytes: number, seconds: number): string {
+  const mbps = bytes / 1024 / 1024 / seconds;
+  return mbps >= 1000
+    ? `${(mbps / 1024).toFixed(1)} GB/s`
+    : `${mbps.toFixed(1)} MB/s`;
+}
+
 async function downloadDump(options: {
   wait: boolean;
   fresh: boolean;
@@ -96,7 +108,7 @@ async function downloadDump(options: {
   else if (options.wait) url.searchParams.set("wait", "true");
 
   console.log(`Fetching dump from ${url}...`);
-  const downloadStart = performance.now();
+  const fetchStart = performance.now();
   const res = await fetch(url, { headers });
 
   if (!res.ok) {
@@ -107,114 +119,94 @@ async function downloadDump(options: {
   }
 
   const dumpPath = join(tempDir, "dump.dump");
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = new Uint8Array(0);
+  let foundDelimiter = false;
+  const binaryChunks: Uint8Array[] = [];
+  let downloadStart = fetchStart;
 
-  if (res.headers.get("X-Status-Stream") === "true") {
-    // Server is streaming status lines followed by \0\n then binary data
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = new Uint8Array(0);
-    let foundDelimiter = false;
-    const binaryChunks: Uint8Array[] = [];
+  // Read stream — status lines arrive before \0\n delimiter, then binary data
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
 
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    if (foundDelimiter) {
+      binaryChunks.push(value);
+      continue;
+    }
 
-      if (foundDelimiter) {
-        binaryChunks.push(value);
-        continue;
+    // Append to buffer
+    const merged = new Uint8Array(buffer.length + value.length);
+    merged.set(buffer);
+    merged.set(value, buffer.length);
+    buffer = merged;
+
+    // Scan for \0\n delimiter
+    let delimIdx = -1;
+    for (let i = 0; i < buffer.length - 1; i++) {
+      if (buffer[i] === 0x00 && buffer[i + 1] === 0x0a) {
+        delimIdx = i;
+        break;
+      }
+    }
+
+    if (delimIdx >= 0) {
+      // Print any remaining status lines before delimiter
+      const statusText = decoder.decode(buffer.slice(0, delimIdx));
+      for (const line of statusText.split("\n").filter(Boolean)) {
+        try {
+          const msg = JSON.parse(line) as { status: string };
+          console.log(`  ${msg.status}`);
+        } catch {}
       }
 
-      // Append to buffer
-      const merged = new Uint8Array(buffer.length + value.length);
-      merged.set(buffer);
-      merged.set(value, buffer.length);
-      buffer = merged;
-
-      // Scan for \0\n delimiter
-      let delimIdx = -1;
-      for (let i = 0; i < buffer.length - 1; i++) {
-        if (buffer[i] === 0x00 && buffer[i + 1] === 0x0a) {
-          delimIdx = i;
+      // Everything after delimiter is binary — download timer starts here
+      downloadStart = performance.now();
+      const remaining = buffer.slice(delimIdx + 2);
+      if (remaining.length > 0) binaryChunks.push(remaining);
+      foundDelimiter = true;
+      buffer = new Uint8Array(0);
+    } else {
+      // Print complete lines as they arrive for real-time feedback
+      let lastNewline = -1;
+      for (let i = buffer.length - 1; i >= 0; i--) {
+        if (buffer[i] === 0x0a) {
+          lastNewline = i;
           break;
         }
       }
-
-      if (delimIdx >= 0) {
-        // Print any remaining status lines before delimiter
-        const statusText = decoder.decode(buffer.slice(0, delimIdx));
-        for (const line of statusText.split("\n").filter(Boolean)) {
+      if (lastNewline >= 0) {
+        const complete = decoder.decode(buffer.slice(0, lastNewline + 1));
+        for (const line of complete.split("\n").filter(Boolean)) {
           try {
             const msg = JSON.parse(line) as { status: string };
             console.log(`  ${msg.status}`);
           } catch {}
         }
-
-        // Everything after delimiter is binary
-        const remaining = buffer.slice(delimIdx + 2);
-        if (remaining.length > 0) binaryChunks.push(remaining);
-        foundDelimiter = true;
-        buffer = new Uint8Array(0);
-      } else {
-        // Print complete lines as they arrive for real-time feedback
-        let lastNewline = -1;
-        for (let i = buffer.length - 1; i >= 0; i--) {
-          if (buffer[i] === 0x0a) {
-            lastNewline = i;
-            break;
-          }
-        }
-        if (lastNewline >= 0) {
-          const complete = decoder.decode(buffer.slice(0, lastNewline + 1));
-          for (const line of complete.split("\n").filter(Boolean)) {
-            try {
-              const msg = JSON.parse(line) as { status: string };
-              console.log(`  ${msg.status}`);
-            } catch {}
-          }
-          buffer = buffer.slice(lastNewline + 1);
-        }
+        buffer = buffer.slice(lastNewline + 1);
       }
     }
-
-    if (!foundDelimiter) {
-      throw new Error("Server closed connection before sending dump data");
-    }
-
-    // Combine binary chunks and write
-    const totalLen = binaryChunks.reduce((s, c) => s + c.length, 0);
-    const data = new Uint8Array(totalLen);
-    let off = 0;
-    for (const chunk of binaryChunks) {
-      data.set(chunk, off);
-      off += chunk.length;
-    }
-    await Bun.write(dumpPath, data);
-
-    const downloadSeconds = (
-      (performance.now() - downloadStart) /
-      1000
-    ).toFixed(1);
-    console.log(
-      `Downloaded ${(totalLen / 1024 / 1024).toFixed(2)} MB in ${downloadSeconds}s`,
-    );
-  } else {
-    // Normal response — read headers and buffer
-    const ageMinutes = res.headers.get("X-Cache-Age-Minutes");
-    const timestamp = res.headers.get("X-Cache-Timestamp");
-    console.log(`Cache age: ${ageMinutes} minutes (from ${timestamp})`);
-
-    const data = await res.arrayBuffer();
-    await Bun.write(dumpPath, data);
-
-    const downloadSeconds = (
-      (performance.now() - downloadStart) /
-      1000
-    ).toFixed(1);
-    console.log(
-      `Downloaded ${(data.byteLength / 1024 / 1024).toFixed(2)} MB in ${downloadSeconds}s`,
-    );
   }
+
+  if (!foundDelimiter) {
+    throw new Error("Server closed connection before sending dump data");
+  }
+
+  // Combine binary chunks and write
+  const totalBytes = binaryChunks.reduce((s, c) => s + c.length, 0);
+  const data = new Uint8Array(totalBytes);
+  let off = 0;
+  for (const chunk of binaryChunks) {
+    data.set(chunk, off);
+    off += chunk.length;
+  }
+  await Bun.write(dumpPath, data);
+
+  const downloadSeconds = (performance.now() - downloadStart) / 1000;
+  console.log(
+    `Downloaded ${formatBytes(totalBytes)} in ${downloadSeconds.toFixed(1)}s (${formatSpeed(totalBytes, downloadSeconds)})`,
+  );
 
   return { dumpPath, tempDir };
 }
@@ -255,7 +247,6 @@ async function restoreDump(dumpPath: string): Promise<void> {
 }
 
 async function cleanup(tempDir: string): Promise<void> {
-  console.log(`Cleaning up temp directory: ${tempDir}`);
   await rm(tempDir, { recursive: true });
 }
 
@@ -368,8 +359,8 @@ async function main(): Promise<void> {
     await cleanup(tempDir);
   }
 
-  const elapsed = Math.round(performance.now() - startTime);
-  console.log(`Done! Took ${elapsed} ms`);
+  const elapsedSec = (performance.now() - startTime) / 1000;
+  console.log(`Done in ${elapsedSec.toFixed(1)}s`);
 }
 
 main().catch((error) => {
