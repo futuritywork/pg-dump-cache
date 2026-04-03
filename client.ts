@@ -16,7 +16,7 @@ const UPDATE_CHECK_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours in ms
 const NO_UPDATE_CHECK = process.env.DUMP_CACHE_NO_UPDATE_CHECK === "1";
 
 const CACHE_SERVER_URL = new URL(
-  process.env.CACHE_SERVER_URL ?? "http://localhost:3000"
+  process.env.CACHE_SERVER_URL ?? "http://localhost:3000",
 );
 const LOCAL_DB_URL = process.env.DATABASE_URL;
 const API_KEY = process.env.API_KEY;
@@ -100,27 +100,122 @@ async function downloadDump(options: {
   const res = await fetch(url, { headers });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: unknown };
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown };
     throw new Error(
       `Download failed: ${res.status} ${body.error ?? res.statusText}`,
     );
   }
 
-  const ageMinutes = res.headers.get("X-Cache-Age-Minutes");
-  const timestamp = res.headers.get("X-Cache-Timestamp");
-  console.log(`Cache age: ${ageMinutes} minutes (from ${timestamp})`);
-
   const dumpPath = join(tempDir, "dump.dump");
 
-  const data = await res.arrayBuffer();
-  await Bun.write(dumpPath, data);
+  if (res.headers.get("X-Status-Stream") === "true") {
+    // Server is streaming status lines followed by \0\n then binary data
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = new Uint8Array(0);
+    let foundDelimiter = false;
+    const binaryChunks: Uint8Array[] = [];
 
-  const downloadSeconds = ((performance.now() - downloadStart) / 1000).toFixed(
-    1,
-  );
-  console.log(
-    `Downloaded ${(data.byteLength / 1024 / 1024).toFixed(2)} MB in ${downloadSeconds}s`,
-  );
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      if (foundDelimiter) {
+        binaryChunks.push(value);
+        continue;
+      }
+
+      // Append to buffer
+      const merged = new Uint8Array(buffer.length + value.length);
+      merged.set(buffer);
+      merged.set(value, buffer.length);
+      buffer = merged;
+
+      // Scan for \0\n delimiter
+      let delimIdx = -1;
+      for (let i = 0; i < buffer.length - 1; i++) {
+        if (buffer[i] === 0x00 && buffer[i + 1] === 0x0a) {
+          delimIdx = i;
+          break;
+        }
+      }
+
+      if (delimIdx >= 0) {
+        // Print any remaining status lines before delimiter
+        const statusText = decoder.decode(buffer.slice(0, delimIdx));
+        for (const line of statusText.split("\n").filter(Boolean)) {
+          try {
+            const msg = JSON.parse(line) as { status: string };
+            console.log(`  ${msg.status}`);
+          } catch {}
+        }
+
+        // Everything after delimiter is binary
+        const remaining = buffer.slice(delimIdx + 2);
+        if (remaining.length > 0) binaryChunks.push(remaining);
+        foundDelimiter = true;
+        buffer = new Uint8Array(0);
+      } else {
+        // Print complete lines as they arrive for real-time feedback
+        let lastNewline = -1;
+        for (let i = buffer.length - 1; i >= 0; i--) {
+          if (buffer[i] === 0x0a) {
+            lastNewline = i;
+            break;
+          }
+        }
+        if (lastNewline >= 0) {
+          const complete = decoder.decode(buffer.slice(0, lastNewline + 1));
+          for (const line of complete.split("\n").filter(Boolean)) {
+            try {
+              const msg = JSON.parse(line) as { status: string };
+              console.log(`  ${msg.status}`);
+            } catch {}
+          }
+          buffer = buffer.slice(lastNewline + 1);
+        }
+      }
+    }
+
+    if (!foundDelimiter) {
+      throw new Error("Server closed connection before sending dump data");
+    }
+
+    // Combine binary chunks and write
+    const totalLen = binaryChunks.reduce((s, c) => s + c.length, 0);
+    const data = new Uint8Array(totalLen);
+    let off = 0;
+    for (const chunk of binaryChunks) {
+      data.set(chunk, off);
+      off += chunk.length;
+    }
+    await Bun.write(dumpPath, data);
+
+    const downloadSeconds = (
+      (performance.now() - downloadStart) /
+      1000
+    ).toFixed(1);
+    console.log(
+      `Downloaded ${(totalLen / 1024 / 1024).toFixed(2)} MB in ${downloadSeconds}s`,
+    );
+  } else {
+    // Normal response — read headers and buffer
+    const ageMinutes = res.headers.get("X-Cache-Age-Minutes");
+    const timestamp = res.headers.get("X-Cache-Timestamp");
+    console.log(`Cache age: ${ageMinutes} minutes (from ${timestamp})`);
+
+    const data = await res.arrayBuffer();
+    await Bun.write(dumpPath, data);
+
+    const downloadSeconds = (
+      (performance.now() - downloadStart) /
+      1000
+    ).toFixed(1);
+    console.log(
+      `Downloaded ${(data.byteLength / 1024 / 1024).toFixed(2)} MB in ${downloadSeconds}s`,
+    );
+  }
+
   return { dumpPath, tempDir };
 }
 

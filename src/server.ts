@@ -216,7 +216,7 @@ Bun.serve({
         req.headers.get("x-real-ip") ??
         "unknown";
       const wait = url.searchParams.get("wait") === "true";
-      let fresh = url.searchParams.get("fresh") === "true";
+      const fresh = url.searchParams.get("fresh") === "true";
       let waited = false;
 
       if (fresh) {
@@ -240,18 +240,75 @@ Bun.serve({
           return new Response("Refresh failed", { status: 500 });
         }
       } else if (getCacheAgeSeconds() > 3600) {
-        // Cache older than 60m — force fresh, hold the connection
-        waited = true;
-        fresh = true;
-        try {
-          await ensureFreshCache(0);
-        } catch {
-          log.error(
-            { ip, fresh: true, waited },
-            "refresh failed during dump request (stale >60m)",
-          );
-          return new Response("Refresh failed", { status: 500 });
-        }
+        // Cache older than 60m — stream status updates, then the dump
+        const ageMin = Math.round(getCacheAgeSeconds() / 60);
+        log.info({ ip, ageMin }, "cache >60m, streaming fresh dump");
+
+        const enc = new TextEncoder();
+        const stream = new ReadableStream({
+          async start(controller) {
+            const status = (msg: string) =>
+              controller.enqueue(
+                enc.encode(`${JSON.stringify({ status: msg })}\n`),
+              );
+
+            status(`Cache is ${ageMin}m old — refreshing...`);
+
+            const t0 = performance.now();
+            try {
+              await ensureFreshCache(0);
+            } catch (err) {
+              status("Refresh failed");
+              log.error(
+                { ip, err },
+                "refresh failed during streaming dump request",
+              );
+              controller.close();
+              return;
+            }
+
+            const secs = ((performance.now() - t0) / 1000).toFixed(1);
+            const cacheAge = Math.round(getCacheAgeSeconds());
+            const ts = latestCache!.timestamp.toISOString();
+            status(`Done in ${secs}s — cache age: ${cacheAge}s (${ts})`);
+
+            // Null-byte delimiter between status and binary data
+            controller.enqueue(new Uint8Array([0x00, 0x0a]));
+
+            // Stream the dump file
+            const reader = Bun.file(latestCache!.path).stream().getReader();
+            for (;;) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              controller.enqueue(value);
+            }
+
+            const durationMs = Math.round(performance.now() - requestStart);
+            const sizeMB = Number(
+              (Bun.file(latestCache!.path).size / 1024 / 1024).toFixed(2),
+            );
+            log.info(
+              {
+                ip,
+                sizeMB,
+                cacheAgeSeconds: cacheAge,
+                fresh: true,
+                waited: true,
+                durationMs,
+              },
+              "streaming dump served",
+            );
+
+            controller.close();
+          },
+        });
+
+        return new Response(stream, {
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "X-Status-Stream": "true",
+          },
+        });
       } else {
         triggerRefresh(ttl);
       }
