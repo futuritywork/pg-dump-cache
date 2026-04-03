@@ -216,7 +216,7 @@ Bun.serve({
         req.headers.get("x-real-ip") ??
         "unknown";
       const wait = url.searchParams.get("wait") === "true";
-      const fresh = url.searchParams.get("fresh") === "true";
+      let fresh = url.searchParams.get("fresh") === "true";
       let waited = false;
 
       if (fresh) {
@@ -237,6 +237,19 @@ Bun.serve({
           await ensureFreshCache(ttl);
         } catch {
           log.error({ ip, waited }, "refresh failed during dump request");
+          return new Response("Refresh failed", { status: 500 });
+        }
+      } else if (getCacheAgeSeconds() > 3600) {
+        // Cache older than 60m — force fresh, hold the connection
+        waited = true;
+        fresh = true;
+        try {
+          await ensureFreshCache(0);
+        } catch {
+          log.error(
+            { ip, fresh: true, waited },
+            "refresh failed during dump request (stale >60m)",
+          );
           return new Response("Refresh failed", { status: 500 });
         }
       } else {
