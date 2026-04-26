@@ -29,6 +29,9 @@ export LOCAL_DB_URL="postgresql://user:pass@localhost/mydb"
 
 # Check server status
 ./client.ts --status
+
+# Tune parallel download concurrency (default: 8)
+./client.ts -n 16
 ```
 
 ## Options
@@ -38,8 +41,23 @@ export LOCAL_DB_URL="postgresql://user:pass@localhost/mydb"
 | `-w, --wait` | Wait for fresh dump if cache is stale |
 | `-f, --fresh` | Force refresh before fetching |
 | `-s, --status` | Show server status and exit |
+| `-n, --concurrency N` | Parallel download streams (default: 8, max: 64) |
 | `-h, --help` | Show help |
 | `--no-update-check` | Disable auto-update check |
+
+## Download Protocol
+
+The client fetches a dump in two phases:
+
+1. **Prepare** — `GET /dump?prepare=true` runs any required refresh and streams
+   NDJSON status lines, then a final `{ "ready": true, "ts": <ms>, "size": <bytes> }`
+   line that pins to a specific cache file.
+2. **Fanout** — N parallel `GET /dump/file?ts=<ts>` requests with `Range`
+   headers, each writing into the destination file at its offset. This
+   bypasses per-connection bandwidth caps and saturates the network link.
+
+The legacy single-stream `GET /dump` endpoint (status NDJSON + `\0\n` + binary
+payload) is preserved for backwards compatibility.
 
 ## Environment Variables
 

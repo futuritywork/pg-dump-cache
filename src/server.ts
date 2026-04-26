@@ -217,14 +217,14 @@ Bun.serve({
         "unknown";
       const wait = url.searchParams.get("wait") === "true";
       const fresh = url.searchParams.get("fresh") === "true";
+      const prepare = url.searchParams.get("prepare") === "true";
 
       const enc = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
-          const status = (msg: string) =>
-            controller.enqueue(
-              enc.encode(`${JSON.stringify({ status: msg })}\n`),
-            );
+          const emit = (obj: object) =>
+            controller.enqueue(enc.encode(`${JSON.stringify(obj)}\n`));
+          const status = (msg: string) => emit({ status: msg });
 
           // --- refresh phase ---
           if (fresh) {
@@ -298,13 +298,35 @@ Bun.serve({
             return;
           }
 
-          // --- send file info + binary data ---
+          // --- send file info ---
           const cacheAge = Math.round(getCacheAgeSeconds());
           const sizeMB = Number((file.size / 1024 / 1024).toFixed(2));
+          const ts = latestCache.timestamp.getTime();
           status(
             `Sending ${sizeMB} MB (age: ${cacheAge}s, ${latestCache.timestamp.toISOString()})`,
           );
 
+          // --- prepare mode: emit handle + close, no binary ---
+          if (prepare) {
+            emit({ ready: true, ts, size: file.size });
+            const durationMs = Math.round(performance.now() - requestStart);
+            log.info(
+              {
+                ip,
+                sizeMB,
+                cacheAgeSeconds: cacheAge,
+                fresh,
+                wait,
+                ts,
+                durationMs,
+              },
+              "dump prepared",
+            );
+            controller.close();
+            return;
+          }
+
+          // --- legacy mode: stream binary after \0\n delimiter ---
           controller.enqueue(new Uint8Array([0x00, 0x0a]));
 
           const reader = file.stream().getReader();
@@ -328,6 +350,84 @@ Bun.serve({
         headers: {
           "Content-Type": "application/octet-stream",
           "X-Status-Stream": "true",
+        },
+      });
+    }
+
+    if (req.method === "GET" && url.pathname === "/dump/file") {
+      const ip =
+        req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ??
+        req.headers.get("x-real-ip") ??
+        "unknown";
+
+      const ts = url.searchParams.get("ts");
+      if (!ts || !/^\d+$/.test(ts)) {
+        return Response.json(
+          { error: "Missing or invalid ts" },
+          { status: 400 },
+        );
+      }
+
+      const filepath = join(CACHE_DIR, `dump-${ts}.tar.gz`);
+      const file = Bun.file(filepath);
+      if (!(await file.exists())) {
+        log.warn({ ip, ts }, "cache file not found for range request");
+        return Response.json(
+          { error: "Cache file not found" },
+          { status: 410 },
+        );
+      }
+
+      const total = file.size;
+      const range = req.headers.get("range");
+
+      if (!range) {
+        return new Response(file, {
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": String(total),
+            "Accept-Ranges": "bytes",
+          },
+        });
+      }
+
+      const m = range.match(/^bytes=(\d+)-(\d+)?$/);
+      if (!m) {
+        return Response.json(
+          { error: "Invalid range" },
+          {
+            status: 416,
+            headers: { "Content-Range": `bytes */${total}` },
+          },
+        );
+      }
+
+      const start = Number(m[1]);
+      const end = m[2] ? Number(m[2]) : total - 1;
+
+      if (
+        !Number.isFinite(start) ||
+        !Number.isFinite(end) ||
+        start < 0 ||
+        end >= total ||
+        start > end
+      ) {
+        return Response.json(
+          { error: "Range not satisfiable" },
+          {
+            status: 416,
+            headers: { "Content-Range": `bytes */${total}` },
+          },
+        );
+      }
+
+      return new Response(file.slice(start, end + 1), {
+        status: 206,
+        headers: {
+          "Content-Type": "application/octet-stream",
+          "Content-Range": `bytes ${start}-${end}/${total}`,
+          "Content-Length": String(end - start + 1),
+          "Accept-Ranges": "bytes",
         },
       });
     }
