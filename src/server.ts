@@ -1,4 +1,4 @@
-import { mkdir, readdir, rm } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 import pino from "pino";
 import { env } from "./env.js";
@@ -61,9 +61,12 @@ async function performDump(): Promise<CacheEntry> {
   const timestamp = new Date();
   const filename = `dump-${timestamp.getTime()}.tar.gz`;
   const filepath = join(CACHE_DIR, filename);
+  // pg_dump writes here first; only a finished dump gets the name that loadExistingDumps and /dump/file serve.
+  const partialPath = `${filepath}.partial`;
 
   log.info({ filepath }, "starting pg_dump");
 
+  // Write straight to disk: buffering the dump in memory gets the container OOM-killed once the dump outgrows its memory limit.
   const proc = Bun.spawn(
     [
       "pg_dump",
@@ -71,26 +74,30 @@ async function performDump(): Promise<CacheEntry> {
       "--no-acl",
       "--format=custom",
       "--compress=6",
+      `--file=${partialPath}`,
       ...EXCLUDE_TABLES.flatMap((t) => ["--exclude-table", t]),
       DATABASE_URL,
     ],
     {
-      stdout: "pipe",
+      stdout: "ignore",
       stderr: "pipe",
     },
   );
 
-  const output = await new Response(proc.stdout).arrayBuffer();
-  const exitCode = await proc.exited;
+  const [stderr, exitCode] = await Promise.all([
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
 
   if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
+    await rm(partialPath, { force: true });
     throw new Error(`pg_dump failed with exit code ${exitCode}: ${stderr}`);
   }
 
-  await Bun.write(filepath, output);
+  await rename(partialPath, filepath);
+  const { size } = await stat(filepath);
   log.info(
-    { filepath, sizeMB: Number((output.byteLength / 1024 / 1024).toFixed(2)) },
+    { filepath, sizeMB: Number((size / 1024 / 1024).toFixed(2)) },
     "pg_dump completed",
   );
 
